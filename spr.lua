@@ -237,6 +237,162 @@ local LinearSpring = {} do
 	end
 end
 
+
+local function matrixToAxis(m)
+	local axis, angle = m:toAxisAngle()
+	return axis*angle
+end
+
+local function axisToMatrix(v)
+	if v.magnitude > 1e-5 then
+		return CFrame.fromAxisAngle(v.unit, v.magnitude)
+	end
+	return CFrame.new()
+end
+
+local function rotDistCos(m1, m2)
+	local cosTheta = m1.LookVector:Dot(m2.LookVector)
+	return 1-cosTheta
+end
+-- spring for an array of rotational values
+local RotationalSpring = {} do
+	RotationalSpring.__index = RotationalSpring
+
+	function RotationalSpring.new(dampingRatio, frequency, pos, typedat, rawTarget)
+		local rotationalPos = typedat.toIntermediate(pos)
+		return setmetatable(
+			{
+				d = dampingRatio,
+				f = frequency,
+				g = rotationalPos,
+				p = rotationalPos,
+				v = Vector3.new(0,0,0),
+				typedat = typedat,
+				rawTarget = rawTarget,
+			},
+			RotationalSpring
+		)
+	end
+
+	function RotationalSpring:setGoal(goal)
+		self.rawTarget = goal
+		self.g = self.typedat.toIntermediate(goal)
+	end
+
+	function RotationalSpring:canSleep()
+		if self.v.Magnitude > SLEEP_VELOCITY_SQ_LIMIT then
+			return false
+		end
+
+		if rotDistCos(self.p, self.g) > SLEEP_OFFSET_SQ_LIMIT then
+			return false
+		end
+
+		return false
+	end
+
+	function RotationalSpring:step(dt)
+		-- Advance the spring simulation by dt seconds.
+		-- Take the damped harmonic oscillator ODE:
+		--    f^2*(X[t] - g) + 2*d*f*X'[t] + X''[t] = 0
+		-- Where X[t] is position at time t, g is target position,
+		-- f is undamped angular frequency, and d is damping ratio.
+		-- Apply constant initial conditions:
+		--    X[0] = p0
+		--    X'[0] = v0
+		-- Solve the IVP to get analytic expressions for X[t] and X'[t].
+		-- The solution takes one of three forms for 0<=d<1, d=1, and d>1
+
+		local d = self.d
+		local f = self.f*2*pi -- Hz -> Rad/s
+		local gPos = self.g.Position
+		local g = self.g -self.g.Position
+		local pPos = self.p.Position
+		local p0 = self.p - pPos
+		local v0 = self.v
+
+		if d == 1 then -- critically damped
+			-- offset
+			local o = matrixToAxis(p0*g:inverse())
+
+			-- decay factor
+			local q = exp(-f*dt)
+
+			-- pos update
+			local p = axisToMatrix((o*(1 + f*dt) + v0*dt)*q)*g
+
+			-- vel update
+			local v = (v0*(1 - dt*f) - o*(dt*f*f))*q
+
+			self.p, self.v = p+gPos, v
+		elseif d < 1 then -- underdamped
+			local q = exp(-d*f*dt)
+			local c = sqrt(1 - d*d)
+
+			local i = cos(dt*f*c)
+			local j = sin(dt*f*c)
+
+			-- Damping ratios approaching 1 can cause division by very small numbers.
+			-- To mitigate that, group terms around z=j/c and find an approximation for z.
+			-- Start with the definition of z:
+			--    z = sin(dt*f*c)/c
+			-- Substitute a=dt*f:
+			--    z = sin(a*c)/c
+			-- Take the Maclaurin expansion of z with respect to c:
+			--    z = a - (a^3*c^2)/6 + (a^5*c^4)/120 + O(c^6)
+			--    z ≈ a - (a^3*c^2)/6 + (a^5*c^4)/120
+			-- Rewrite in Horner form:
+			--    z ≈ a + ((a*a)*(c*c)*(c*c)/20 - c*c)*(a*a*a)/6
+
+			local z
+			if c > EPS then
+				z = j/c
+			else
+				local a = dt*f
+				z = a + ((a*a)*(c*c)*(c*c)/20 - c*c)*(a*a*a)/6
+			end
+
+			-- Frequencies approaching 0 present a similar problem.
+			-- We want an approximation for y as f approaches 0, where:
+			--    y = sin(dt*f*c)/(f*c)
+			-- Substitute b=dt*c:
+			--    y = sin(b*c)/b
+			-- Now reapply the process from z.
+
+			local y
+			if f*c > EPS then
+				y = j/(f*c)
+			else
+				local b = f*c
+				y = dt + ((dt*dt)*(b*b)*(b*b)/20 - b*b)*(dt*dt*dt)/6
+			end
+			local o = matrixToAxis(p0*g:inverse())
+			local p = axisToMatrix((o*(i + z*d) + v0*y)*q)*g
+			local v = (v0*(i - z*d) - o*(z*f))*q
+
+			self.p, self.v = p+gPos, v
+		else -- overdamped
+			local c = sqrt(d*d - 1)
+
+			local r1 = -f*(d - c)
+			local r2 = -f*(d + c)
+
+			local ec1 = exp(r1*dt)
+			local ec2 = exp(r2*dt)
+
+			local o = matrixToAxis(p0*g:inverse())
+			local co2 = (v0 - o*r1)/(2*f*c)
+			local co1 = ec1*(o - co2)
+			local p = axisToMatrix(co1 + co2*ec2)*g
+			local v = co1*r1 + co2*ec2*r2
+
+			self.p, self.v = p+gPos, v
+		end
+
+		return self.typedat.fromIntermediate(self.p)
+	end
+end
+
 -- transforms Roblox types into intermediate types, converting
 -- between spaces as necessary to preserve perceptual linearity
 local typeMetadata = {
@@ -311,6 +467,17 @@ local typeMetadata = {
 
 		fromIntermediate = function(value)
 			return Vector3.new(value[1], value[2], value[3])
+		end,
+	},
+
+	CFrame = {
+		springType = RotationalSpring.new,
+		toIntermediate = function(value)
+			return value
+		end,
+
+		fromIntermediate = function(value)
+			return value
 		end,
 	},
 
