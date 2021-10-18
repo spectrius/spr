@@ -11,6 +11,7 @@ interface spr {
 		dampingRatio: number,
 		undampedFrequency: number,
 		targetProperties: Partial<FilterMembers<T, SprTweenable>>,
+		ignoreDistanceCheck = false,
 	) => void;
 
 	/**

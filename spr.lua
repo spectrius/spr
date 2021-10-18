@@ -1,4 +1,4 @@
----------------------------------------------------------------------
+---------------------------------------------------------------------T
 -- spr - Spring-driven motion library
 --
 -- Copyright (c) 2021 Parker Stebbins. All rights reserved.
@@ -593,11 +593,38 @@ end
 
 local spr = {}
 
-function spr.target(instance, dampingRatio, frequency, properties)
-	assertType(1, "spr.target", "Instance", instance)
-	assertType(2, "spr.target", "number", dampingRatio)
-	assertType(3, "spr.target", "number", frequency)
-	assertType(4, "spr.target", "table", properties)
+function spr.target(instance, dampingRatio, frequency, properties, ignoreDistanceCheck)
+	assertType(1, "Spr.target", "Instance", instance)
+	assertType(2, "Spr.target", "number", dampingRatio)
+	assertType(3, "Spr.target", "number", frequency)
+	assertType(4, "Spr.target", "table", properties)
+
+	if RunService:IsClient() then
+		local basePart = (instance:IsA("BasePart") and instance) or instance:FindFirstAncestorWhichIsA("BasePart")
+		
+		if basePart then
+			local camera = workspace.CurrentCamera
+			if not camera then
+				for property, value in next, properties do
+					spr.stop(instance, property)
+					instance[property] = value
+				end
+
+				return
+			end
+
+			local distance = (camera.CFrame.Position - basePart.Position).Magnitude
+
+			if not ignoreDistanceCheck and distance > 120 then
+				for property, value in next, properties do
+					spr.stop(instance, property)
+					instance[property] = value
+				end
+
+				return
+			end
+		end
+	end
 
 	if dampingRatio ~= dampingRatio or dampingRatio < 0 then
 		error(("expected damping ratio >= 0; got %.2f"):format(dampingRatio), 2)
@@ -619,7 +646,7 @@ function spr.target(instance, dampingRatio, frequency, properties)
 
 		if STRICT_TYPES and typeof(propTarget) ~= typeof(propValue) then
 			error(
-				("bad property %s to spr.target (%s expected, got %s)"):format(
+				("bad property %s to Spr.target (%s expected, got %s)"):format(
 					propName,
 					typeof(propValue),
 					typeof(propTarget)
